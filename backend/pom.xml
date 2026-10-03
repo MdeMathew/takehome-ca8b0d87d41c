@@ -36,6 +36,11 @@
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-surefire-plugin</artifactId>
         <version>3.5.2</version>
+        <configuration>
+          <excludes>
+            <exclude>**/._*</exclude>
+          </excludes>
+        </configuration>
       </plugin>
       <plugin>
         <!-- `mvn verify`: the same, plus the check, which is an IT because it needs a server up. -->

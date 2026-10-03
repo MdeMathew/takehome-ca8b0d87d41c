@@ -1,7 +1,8 @@
-package es.workfactory.bookingsync;
+package es.workfactory.bookingsync.pms;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import es.workfactory.bookingsync.Env;
 import es.workfactory.bookingsync.domain.NormalizedBooking;
 import java.net.URI;
 import java.net.http.HttpClient;

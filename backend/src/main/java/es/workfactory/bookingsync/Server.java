@@ -2,14 +2,22 @@ package es.workfactory.bookingsync;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import es.workfactory.bookingsync.domain.BookingRecord;
+import es.workfactory.bookingsync.domain.payload_normalize.ChannelPayloadNormalizer;
 import es.workfactory.bookingsync.http.Json;
+import es.workfactory.bookingsync.pms.PmsRegisterer;
+
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /**
  * Your API, and the screen it feeds. The routing, the static page and the error envelope are
@@ -21,7 +29,6 @@ public final class Server {
 
     private static final Pattern BOOKING = Pattern.compile("^/api/bookings/([^/]+)$");
     private static final Pattern RETRY = Pattern.compile("^/api/bookings/([^/]+)/retry$");
-
     private Server() {}
 
     /**
@@ -35,18 +42,62 @@ public final class Server {
      * forgetting about the rest: every booking has to end up synced or failed, and a duplicate can
      * never reach the PMS twice.
      */
-    private static void startChannelConsumer() {
-        System.out.println("The channel consumer is not written yet.");
+    private static void startChannelConsumer() throws Exception {
+        while (true) {
+            ChannelClient.EventsPage eventsPage = ChannelClient.fetchEvents(10);
+            parallelConfirmEvents(eventsPage);
+            Set<BookingRecord> newBookings = clearKnownBookings(normalizeToBookingRecord(eventsPage));
+            PmsRegisterer.enqueueNewBookings(newBookings);
+            TimeUnit.MILLISECONDS.sleep(400);
+        }
+    }
+
+    private static Set<BookingRecord> clearKnownBookings(Set<BookingRecord> normalizedBookings) {
+        Set<BookingRecord> newBookings = new java.util.HashSet<>(Set.copyOf(normalizedBookings));
+        for (BookingRecord booking : normalizedBookings) {
+            if (isKnown(booking)) {
+                newBookings.remove(booking);
+            } else {
+                Store.upsert(booking);
+            }
+        }
+        return newBookings;
+    }
+
+    private static boolean isKnown(BookingRecord booking) {
+        return Store.get(booking.getId()).isPresent();
+    }
+
+    private static Set<BookingRecord> normalizeToBookingRecord(ChannelClient.EventsPage eventsPage) {
+        return eventsPage.events().stream()
+                .map(e -> ChannelPayloadNormalizer.normalize(e.payload()))
+                .map(normalizedBooking -> BookingRecord.as(normalizedBooking, "pending", 0))
+                .collect(Collectors.toSet());
+    }
+
+    private static void parallelConfirmEvents(ChannelClient.EventsPage eventsPage) {
+        eventsPage.events().stream().parallel().forEach(e -> {
+            try {
+                ChannelClient.ackEvent(e.eventId());
+            } catch (Exception ex) {
+                throw new RuntimeException(ex);
+            }
+        });
     }
 
     /** YOUR JOB (2 of 4): every booking, most recently updated first. */
     private static void listBookings(HttpExchange exchange) throws IOException {
-        Json.notImplemented(exchange, "The list of bookings");
+        Json.send(exchange, 200, Map.of("items", Store.list()));
     }
 
     /** YOUR JOB (3 of 4): one booking, with its current sync status. */
     private static void bookingDetail(HttpExchange exchange, String id) throws IOException {
-        Json.notImplemented(exchange, "The booking detail");
+        var booking = Store.get(id);
+        if (booking.isEmpty()) {
+            Json.fail(exchange, 404, "NOT_FOUND", "Booking " + id + " does not exist.");
+            return;
+        }
+        Json.send(exchange, 200, booking.get());
     }
 
     /**
@@ -54,7 +105,19 @@ public final class Server {
      * failed; what happens to any other status is your call.
      */
     private static void forceRetry(HttpExchange exchange, String id) throws IOException {
-        Json.notImplemented(exchange, "Forcing a retry");
+        var booking = Store.get(id);
+        if (booking.isEmpty()) {
+            Json.fail(exchange, 404, "NOT_FOUND", "Booking " + id + " does not exist.");
+            return;
+        }
+
+        switch (PmsRegisterer.retryFailedBooking(booking.get())) {
+            case ACCEPTED -> Json.send(exchange, 202, booking.get());
+            case NOT_FAILED -> Json.fail(exchange, 409, "INVALID_STATUS",
+                    "Only failed bookings can be retried.");
+            case UNAVAILABLE -> Json.fail(exchange, 503, "RETRY_UNAVAILABLE",
+                    "The PMS worker cannot accept a retry right now.");
+        }
     }
 
     public static HttpServer start(int port) throws IOException {
@@ -123,10 +186,17 @@ public final class Server {
         throw new IOException("frontend/index.html is not where the server looks for it.");
     }
 
-    public static void main(String[] args) throws IOException {
+    public static void main(String[] args) throws Exception {
         int port = Integer.parseInt(Env.optional("PORT", "3000"));
-        start(port);
+        HttpServer server = start(port);
+        PmsRegisterer.start();
+        Runtime.getRuntime().addShutdownHook(new Thread(PmsRegisterer::stop, "pms-shutdown"));
         System.out.println("Listening on http://localhost:" + port);
-        startChannelConsumer();
+        try {
+            startChannelConsumer();
+        } finally {
+            PmsRegisterer.stop();
+            server.stop(0);
+        }
     }
 }

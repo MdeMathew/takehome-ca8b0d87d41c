@@ -22,7 +22,7 @@ public final class BookingRecord {
     private volatile String pmsReference;
     private volatile String updatedAt;
 
-    public BookingRecord(NormalizedBooking booking, String status, int attempts) {
+    private BookingRecord(NormalizedBooking booking, String status, int attempts) {
         this.id = booking.id();
         this.channel = booking.channel();
         this.guestName = booking.guestName();
@@ -35,16 +35,20 @@ public final class BookingRecord {
         this.updatedAt = Instant.now().toString();
     }
 
+    public static BookingRecord as(NormalizedBooking booking, String status, int attempts) {
+        return new BookingRecord(booking, status, attempts);
+    }
+
     public NormalizedBooking toNormalizedBooking() {
         return new NormalizedBooking(id, channel, guestName, checkIn, checkOut, totalPrice, currency);
     }
 
     public void markStatus(String status, int attempts, String lastError, String pmsReference) {
-        this.status = status;
         this.attempts = attempts;
-        if (lastError != null) this.lastError = lastError;
-        if (pmsReference != null) this.pmsReference = pmsReference;
+        this.lastError = lastError;
+        this.pmsReference = pmsReference;
         this.updatedAt = Instant.now().toString();
+        this.status = status;
     }
 
     public String getId() { return id; }
