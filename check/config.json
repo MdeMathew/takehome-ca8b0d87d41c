@@ -1,0 +1,8 @@
+{
+  "cwd": "backend",
+  "mock": "mock",
+  "start": {
+    "posix": "./mvnw -q compile exec:java@start",
+    "win32": "mvnw.cmd -q compile exec:java@start"
+  }
+}

@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Centro de control · Sincronizador de reservas</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 52rem; padding: 0 1rem; }
+  h1 { font-size: 1.25rem; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: .5rem .75rem; border-bottom: 1px solid #e5e5e5; }
+  th { font-weight: 600; color: #555; font-size: .875rem; }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover { background: #f6f6f6; }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: .4rem 1.5rem; align-items: baseline; }
+  dt { color: #555; }
+  dd { margin: 0; }
+  .note { color: #777; font-size: .875rem; }
+  .problem { color: #a11; }
+  .back { display: inline-block; margin-bottom: 1rem; }
+  button { font: inherit; padding: .4rem .9rem; cursor: pointer; }
+  .todo { border: 1px dashed #b58; background: #fdf7fb; padding: 1rem 1.25rem; }
+</style>
+</head>
+<body>
+<h1>Centro de control · Sincronizador de reservas</h1>
+
+<div id="out">Cargando…</div>
+
+<script>
+/**
+ * La pantalla. Pesa lo mismo que el back.
+ *
+ * Escrito ya: el `fetch` con el sobre de error y el enrutado por `?booking=`.
+ * Tuyo: las dos funciones que pintan. Puedes tirar este fichero entero y montarlo con lo que
+ * quieras (React, Vue, Svelte, Vite...). No se puntúa la tecnología ni el diseño.
+ */
+const out = document.getElementById("out");
+
+function escapeHtml(value) {
+    return String(value ?? "").replace(/[&<>"']/g, (character) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    })[character]);
+}
+
+async function ask(path, options = {}) {
+    const response = await fetch(path, options);
+    const body = await response.json().catch(() => null);
+    if (!response.ok) {
+        throw new Error(`${body?.error?.code ?? response.status}: ${body?.error?.message ?? ""}`);
+    }
+    return body;
+}
+
+/**
+ * TU TRABAJO (1 de 2): el listado.
+ *
+ * Recibe lo que devuelva tu `GET /api/bookings`. De cada reserva tiene que verse su estado
+ * (🟢 Sincronizado, 🟡 Reintentando, 🔴 Fallido, o lo que decidas para "aún sin empezar"), y al
+ * pulsar una, entrar en su detalle.
+ */
+function renderList(bookings) {
+    out.className = "todo";
+    out.innerHTML = `<p><b>PANTALLA_SIN_ESCRIBIR</b> · el listado</p>
+      <p>Tu API te ha devuelto ${bookings.length} reservas y esta función todavía no las pinta.</p>`;
+}
+
+/**
+ * TU TRABAJO (2 de 2): el detalle de una reserva.
+ *
+ * Desde aquí se fuerza la sincronización manual de una reserva fallida: un botón que llama a tu
+ * endpoint de reintento y enseña cómo va.
+ */
+function renderDetail(booking) {
+    out.className = "todo";
+    out.innerHTML = `<p><b>PANTALLA_SIN_ESCRIBIR</b> · el detalle de ${escapeHtml(booking.id ?? "")}</p>
+      <p><a class="back" href="?">← todas las reservas</a></p>`;
+}
+
+/** El enrutado y el manejo del fallo. Escrito, para que empieces por lo que se ve. */
+async function load() {
+    const wanted = new URLSearchParams(location.search).get("booking");
+    out.textContent = "Cargando…";
+    try {
+        if (wanted) {
+            renderDetail(await ask(`/api/bookings/${encodeURIComponent(wanted)}`));
+        } else {
+            renderList((await ask("/api/bookings")).items ?? []);
+        }
+    } catch (error) {
+        out.innerHTML = `<p class="problem">${escapeHtml(error.message ?? error)}</p>`;
+    }
+}
+
+load();
+</script>
+</body>
+</html>
