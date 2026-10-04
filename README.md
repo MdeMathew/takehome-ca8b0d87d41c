@@ -1,11 +1,36 @@
 # Sincronizador de reservas
 
-<Aquí va lo que construyas: cómo lo enfocaste, qué encontraste por el camino, y una captura de
-la pantalla funcionando.>
+Servicio Java 21 que consulta los eventos de Booking y Airbnb, normaliza sus reservas y las envía a un PMS lento. La API y la pantalla permiten seguir el estado de cada reserva y reintentar manualmente las que hayan fallado.
+
+![Pantalla de reservas funcionando con el simulador local](docs/pantalla-funcionando.png)
+
+*Captura tomada con el simulador local: muestra reservas sincronizadas, en curso y en reintento.*
 
 ## Cómo se arranca
 
-La imagen incluye el servicio Java y la pantalla HTML. Estos comandos permiten usarla con el simulador local.
+Se necesitan Java 21 o superior, Node 22.6 o superior para el simulador y el comprobador, y Docker solo si se usa la imagen. El servicio escucha en `http://localhost:3000/` y el simulador en `http://localhost:4000/`.
+
+### Ejecución local
+
+En una terminal, desde `java/`:
+
+```sh
+cd mock
+node --experimental-strip-types src/application/local-main.ts
+```
+
+En otra terminal, también desde `java/`:
+
+```sh
+cd backend
+API_BASE=http://localhost:4000 API_TOKEN=wf_local ./mvnw compile exec:java@start
+```
+
+Abre `http://localhost:3000/`. Las variables del comando apuntan expresamente al simulador, aunque `backend/.env` contenga credenciales de otra API. Para usar la API real, copia `backend/.env.example` a `backend/.env`, configura `API_BASE` y `API_TOKEN` con los valores recibidos y ejecuta `./mvnw compile exec:java@start` sin esas variables de entorno. No incluyas el token real en el repositorio.
+
+### Comprobaciones
+
+Desde `java/backend/`, `./mvnw test` ejecuta las pruebas propias. Desde `java/`, `node check/check.mjs` arranca sus propios procesos y ejecuta el comprobador proporcionado. En la última ejecución local pasaron las 9 pruebas propias y las 12 comprobaciones del comprobador. La aplicación también respondió `200` en `/`, `/health` y `/api/bookings` al arrancar la imagen Docker con el simulador.
 
 ### Imagen Docker
 
@@ -22,7 +47,7 @@ cd mock
 node --experimental-strip-types src/application/local-main.ts
 ```
 
-Después arranca el servicio desde `java/` (en macOS o Windows):
+Después arranca el servicio desde `java/` en una terminal de macOS o Linux:
 
 ```sh
 docker run --rm --name booking-sync -p 3000:3000 \
@@ -35,6 +60,12 @@ Abre `http://localhost:3000/` para ver la pantalla y `http://localhost:3000/heal
 
 Si construyes desde un disco externo en macOS y Docker falla con `failed to xattr ._*`, ejecuta `dot_clean -m .` desde `java/` para retirar esos archivos auxiliares de macOS y repite `docker build`.
 
+## Por qué elegí esta tecnología
+
+Conservé Java 21 y Maven porque el esqueleto ya incluía los clientes HTTP, Jackson y el comprobador preparado para ese arranque. `HttpServer` de la biblioteca estándar basta para estas rutas y evita añadir un framework solo para servir la API y el HTML. La estructura separa el dominio de las llamadas HTTP y permite probar el registro en el PMS con un cliente sustituible.
+
+El código propio está repartido entre `backend/src/main/java/es/workfactory/bookingsync/` (`channel/` para los eventos, `domain/` para reservas y normalización, `pms/` para envío y reintentos, `store/` para el estado, `http/` para respuestas y `Server` para las rutas). `frontend/index.html` contiene la pantalla. `mock/` y `check/` son los recursos proporcionados, y `docs/` contiene la captura.
+
 ## Cómo usaste la IA
 
 Usé la IA para:
@@ -46,6 +77,8 @@ Usé la IA para:
 - Entender el problema al inicio y definir la estructura de carpetas.
 - Desarrollar pruebas para comprobar el comportamiento de la aplicación.
 - Pedirle que generara diagramas de clases del proyecto.
+
+Dividí las consultas entre estructura, implementación y validación. Revisé el código y contrasté el resultado con las pruebas propias, el comprobador y la pantalla en ejecución antes de dar por buena cada parte. Mantuve los límites que no podía verificar como garantías, especialmente la recuperación tras reiniciar y los envíos al PMS con resultado incierto, en vez de presentarlos como resueltos.
 
 ## Decisiones y lo que dejaste sin resolver
 
@@ -64,3 +97,13 @@ El flujo de consulta y confirmación de eventos funciona en los escenarios cubie
 Al revisar los errores de comunicación con el PMS detecté otro caso pendiente: si el envío agota su tiempo de espera o se corta la conexión, el PMS podría haber registrado la reserva aunque mi servicio no recibiera la respuesta. Ahora el trabajador trata esa excepción como un fallo recuperable y vuelve a enviar la reserva, lo que puede crear un duplicado. Para comprobar el resultado tendría que consultar `GET /pms/reservations`, recorrer sus páginas mediante `_links.next` y buscar el `bookingId` antes de decidir qué hacer. No implementé ese módulo de consulta paginada por falta de tiempo. Además, que la reserva no aparezca en una consulta no garantiza que el primer envío no termine más tarde; sin una garantía de idempotencia del PMS no puedo asegurar ausencia absoluta de duplicados ante un resultado incierto.
 
 El trabajo pendiente para el PMS vive en una cola en memoria. Un supervisor comprueba si el hilo trabajador termina inesperadamente y arranca otro para continuar con las reservas que sigan en esa cola. La reserva que estaba en curso queda marcada como fallida con resultado incierto; no la reenvío automáticamente porque el PMS podría haberla aceptado antes de que el hilo terminara. Si se reinicia el proceso, la cola se pierde. Para una solución con recuperación había pensado en guardar una tabla de trabajos pendientes: al arrancar o reiniciar el trabajador, consultaría esa tabla para recuperar los trabajos aún pendientes y trataría por separado los envíos con resultado incierto. No lo implementé por el alcance y la estructura de esta prueba, que parte de un almacenamiento en memoria.
+
+Al probar la API real también comprobé que una sesión puede devolver `done: true` sin eventos pendientes aunque el PMS conserve reservas anteriores. Como el estado de la pantalla está en memoria, reiniciar el servicio no reconstruye esas reservas ni sus estados. En Docker, la primera construcción desde el disco externo falló por archivos auxiliares `._*` de macOS; después de ejecutar `dot_clean -m .`, la imagen construyó y arrancó correctamente.
+
+## Qué dejé fuera a propósito
+
+No añadí una base de datos ni una cola persistente: el objetivo era resolver el flujo de eventos y las transiciones con el tiempo de esta prueba. Tampoco reconstruyo la pantalla leyendo el historial del PMS, porque ese historial no contiene el estado local de los intentos y errores. Una implementación con garantía de recuperación necesitaría persistir cada reserva y su trabajo pendiente antes de confirmar el evento, además de resolver los resultados inciertos del PMS.
+
+## Qué me costó más
+
+La parte más delicada fue confirmar cada evento dentro de 500 ms mientras el PMS tarda segundos y puede fallar. Lo abordé separando la recepción del trabajo del PMS y programando los reintentos fuera del hilo que consulta los canales. El caso que no queda completamente resuelto es el timeout del PMS: un reintento puede duplicar una reserva si la primera petición se registró pero su respuesta no llegó.
