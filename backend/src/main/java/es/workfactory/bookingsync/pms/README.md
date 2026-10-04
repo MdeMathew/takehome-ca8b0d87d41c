@@ -44,4 +44,4 @@ La cola admite hasta 1024 trabajos entre pendientes y activos. Hay un solo traba
 
 ## Alcance de las garantías
 
-La exclusión por ID y la cola actúan **dentro del proceso en ejecución**. Ni el trabajo pendiente ni el estado se conservan al reiniciar la aplicación. Además, si una petición agota su tiempo de espera después de que el PMS la haya aceptado, el resultado es incierto: el reintento automático puede crear otra reserva en el PMS. La implementación no ofrece una garantía de registro exactamente una vez ante ese caso; necesitaría conciliación con el PMS o una clave de idempotencia admitida por él.
+La exclusión por ID y la cola actúan **dentro del proceso en ejecución**. Ni el trabajo pendiente ni el estado se conservan al reiniciar la aplicación.

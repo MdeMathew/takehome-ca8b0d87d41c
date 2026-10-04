@@ -9,7 +9,7 @@ Este paquete concentra la recepción y confirmación de eventos procedentes de l
 3. Devuelve únicamente los eventos cuya confirmación ha recibido una respuesta satisfactoria. `Server` normaliza sus `payload`, descarta reservas ya conocidas y encola las nuevas para el PMS.
 4. El bucle espera 400 ms antes de volver a consultar el canal. El envío al PMS ocurre fuera de este paquete y no retrasa las confirmaciones.
 
-La identidad del evento (`eventId`) sirve para confirmarlo. La identidad de la reserva, que puede aparecer en varios eventos, se gestiona después de la normalización; confirmar un evento no equivale a registrar su reserva en el PMS.
+La identidad de la reserva, que puede aparecer en varios eventos, se gestiona después de la normalización; confirmar un evento no equivale a registrar su reserva en el PMS.
 
 ## Clases y responsabilidades
 
@@ -34,7 +34,3 @@ El cliente utiliza `API_BASE=http://localhost:4000` y `API_TOKEN=wf_local` como 
 `fetchEvents(int limit)` fija un plazo de 500 ms antes de iniciar la consulta. Si esta falla, `manageException` registra una descripción breve para errores de JSON, comunicación o respuesta HTTP no válida y propaga la excepción. Ante una interrupción, restaura la marca de interrupción del hilo.
 
 `acknowledgeEvents` recorre los eventos pendientes y llama a `ChannelClient.ackEvent` con un tiempo de espera individual de hasta 100 ms, ajustado al tiempo restante y al número de eventos pendientes. Si una confirmación falla o devuelve un estado no satisfactorio, conserva el evento pendiente para otro intento dentro del mismo plazo. Entre rondas espera 25 ms. Al agotarse el tiempo, devuelve solo los eventos confirmados; si el hilo se interrumpe, devuelve los confirmados hasta ese momento. La marca `done` se conserva tal como llegó del canal, aunque se hayan filtrado eventos de la lista.
-
-## Límites del contrato actual
-
-Los 500 ms son el presupuesto que aplica el consumidor a las confirmaciones, pero la consulta HTTP forma parte de ese mismo intervalo y puede tener un tiempo de espera mayor. Por ello, este código no garantiza por sí solo que todas las confirmaciones lleguen al canal antes de 500 ms. Un evento sin confirmación satisfactoria no pasa a la normalización en esa vuelta; su nueva entrega depende del canal. Los errores de la consulta se propagan a `Server` y detienen su bucle de consumo actual.
