@@ -3,9 +3,12 @@ package es.workfactory.bookingsync;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
+import es.workfactory.bookingsync.channel.ChannelEventConsumer;
 import es.workfactory.bookingsync.domain.BookingRecord;
 import es.workfactory.bookingsync.domain.NormalizedBooking;
-import es.workfactory.bookingsync.pms.PmsRegisterer;
+import es.workfactory.bookingsync.pms.client.WorkfactoryPmsClient;
+import es.workfactory.bookingsync.pms.registerer.PmsRegisterer;
+import es.workfactory.bookingsync.store.Store;
 import org.junit.jupiter.api.Test;
 
 import java.net.InetSocketAddress;
@@ -33,7 +36,7 @@ class ServerRetryTest {
         HttpServer pms = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         pms.createContext("/pms/reservations", exchange -> {
             int requestNumber = requests.incrementAndGet();
-            int status = requestNumber <= 3 ? 503 : 201;
+            int status = requestNumber <= 4 ? 503 : 201;
             byte[] body = (status == 201 ? "{\"reservationId\":\"pms-retried\"}" : "{}")
                     .getBytes(StandardCharsets.UTF_8);
             exchange.sendResponseHeaders(status, body.length);
@@ -45,6 +48,7 @@ class ServerRetryTest {
 
         String previousApiBase = System.getProperty("API_BASE");
         System.setProperty("API_BASE", "http://127.0.0.1:" + pms.getAddress().getPort());
+        PmsRegisterer registerer = new PmsRegisterer(new WorkfactoryPmsClient());
         HttpServer app = null;
         try {
             Store.clear();
@@ -52,22 +56,22 @@ class ServerRetryTest {
                     "retry-me", "booking", "Guest", "2026-10-10", "2026-10-11", 100.0, "EUR"),
                     "pending", 0);
             Store.upsert(booking);
-            PmsRegisterer.start();
-            PmsRegisterer.enqueueNewBookings(Set.of(booking));
-            app = Server.start(0);
+            registerer.start();
+            registerer.enqueueNewBookings(Set.of(booking));
+            app = new Server(registerer, new ChannelEventConsumer()).start(0);
             String base = "http://127.0.0.1:" + app.getAddress().getPort();
 
             assertEquals(404, post(base + "/api/bookings/missing/retry").statusCode());
             assertEquals(409, post(base + "/api/bookings/retry-me/retry").statusCode());
             awaitStatus(booking, "failed");
-            assertEquals(3, booking.getAttempts());
-            assertEquals(3, requests.get());
+            assertEquals(4, booking.getAttempts());
+            assertEquals(4, requests.get());
 
             HttpResponse<String> accepted = post(base + "/api/bookings/retry-me/retry");
             assertEquals(202, accepted.statusCode());
             assertEquals(409, post(base + "/api/bookings/retry-me/retry").statusCode());
             awaitStatus(booking, "synced");
-            assertEquals(4, requests.get());
+            assertEquals(5, requests.get());
             assertEquals(1, booking.getAttempts());
             assertNull(booking.getLastError());
             assertEquals("pms-retried", booking.getPmsReference());
@@ -78,7 +82,7 @@ class ServerRetryTest {
             assertTrue(detail.path("lastError").isNull());
         } finally {
             if (app != null) app.stop(0);
-            PmsRegisterer.stop();
+            registerer.stop();
             Store.clear();
             if (previousApiBase == null) System.clearProperty("API_BASE");
             else System.setProperty("API_BASE", previousApiBase);

@@ -1,4 +1,4 @@
-package es.workfactory.bookingsync;
+package es.workfactory.bookingsync.store;
 
 import es.workfactory.bookingsync.domain.BookingRecord;
 import java.util.Comparator;

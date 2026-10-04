@@ -1,4 +1,4 @@
-package es.workfactory.bookingsync.pms;
+package es.workfactory.bookingsync.pms.client;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -11,11 +11,8 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.Map;
 
-/**
- * The call to the PMS. It is written, and it is written for exactly one attempt: no retry, no
- * backoff, no queue. Read it before touching it: what is missing is not marked with a TODO.
- */
-public final class PmsClient {
+/** Sends one booking per call; PmsRegisterer owns the queue and retry policy. */
+public final class WorkfactoryPmsClient implements PmsClient {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final HttpClient HTTP = HttpClient.newBuilder()
@@ -23,13 +20,20 @@ public final class PmsClient {
             .version(HttpClient.Version.HTTP_1_1)
             .build();
 
-    private PmsClient() {}
+    private static final String DEFAULT_API_BASE = "http://localhost:4000";
+    private static final String DEFAULT_API_TOKEN = "wf_local";
+    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(15);
+    private final URI reservationsUri;
+    private final String token;
 
-    public record Result(boolean ok, String pmsReference, int status) {}
+    public WorkfactoryPmsClient() {
+        String baseUri = Env.optional("API_BASE", DEFAULT_API_BASE);
+        reservationsUri = URI.create(baseUri + "/pms/reservations");
+        token = Env.optional("API_TOKEN", DEFAULT_API_TOKEN);
+    }
 
-    public static Result submit(NormalizedBooking booking) throws Exception {
-        String apiBase = Env.optional("API_BASE", "http://localhost:4000");
-
+    @Override
+    public Result submit(NormalizedBooking booking) throws Exception {
         String body = MAPPER.writeValueAsString(Map.of(
                 "bookingId", booking.id(),
                 "channel", booking.channel(),
@@ -38,10 +42,8 @@ public final class PmsClient {
                 "checkOut", booking.checkOut(),
                 "totalPrice", booking.totalPrice(),
                 "currency", booking.currency()));
-        String token = Env.optional("API_TOKEN", "wf_local");
-
-        HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(apiBase + "/pms/reservations"))
-                .timeout(Duration.ofSeconds(15))
+        HttpRequest.Builder builder = HttpRequest.newBuilder(reservationsUri)
+                .timeout(REQUEST_TIMEOUT)
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(body));
         builder.header("Authorization", "Bearer " + token);

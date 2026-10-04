@@ -2,10 +2,15 @@ package es.workfactory.bookingsync;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import es.workfactory.bookingsync.channel.ChannelEventConsumer;
+import es.workfactory.bookingsync.channel.EventsPage;
 import es.workfactory.bookingsync.domain.BookingRecord;
 import es.workfactory.bookingsync.domain.payload_normalize.ChannelPayloadNormalizer;
 import es.workfactory.bookingsync.http.Json;
-import es.workfactory.bookingsync.pms.PmsRegisterer;
+import es.workfactory.bookingsync.pms.client.PmsClient;
+import es.workfactory.bookingsync.pms.client.WorkfactoryPmsClient;
+import es.workfactory.bookingsync.pms.registerer.PmsRegisterer;
+import es.workfactory.bookingsync.store.Store;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -13,6 +18,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
@@ -29,7 +35,13 @@ public final class Server {
 
     private static final Pattern BOOKING = Pattern.compile("^/api/bookings/([^/]+)$");
     private static final Pattern RETRY = Pattern.compile("^/api/bookings/([^/]+)/retry$");
-    private Server() {}
+    private final PmsRegisterer pmsRegisterer;
+    private final ChannelEventConsumer channelEventConsumer;
+
+    public Server(PmsRegisterer pmsRegisterer, ChannelEventConsumer channelEventConsumer) {
+        this.pmsRegisterer = Objects.requireNonNull(pmsRegisterer, "pmsRegisterer");
+        this.channelEventConsumer = Objects.requireNonNull(channelEventConsumer, "channelEventConsumer");
+    }
 
     /**
      * YOUR JOB (1 of 4): consume the sales channels. Called once when the server starts.
@@ -42,12 +54,11 @@ public final class Server {
      * forgetting about the rest: every booking has to end up synced or failed, and a duplicate can
      * never reach the PMS twice.
      */
-    private static void startChannelConsumer() throws Exception {
+    void startChannelConsumer() throws Exception {
         while (true) {
-            ChannelClient.EventsPage eventsPage = ChannelClient.fetchEvents(10);
-            parallelConfirmEvents(eventsPage);
+            EventsPage eventsPage = channelEventConsumer.fetchEvents(10);
             Set<BookingRecord> newBookings = clearKnownBookings(normalizeToBookingRecord(eventsPage));
-            PmsRegisterer.enqueueNewBookings(newBookings);
+            pmsRegisterer.enqueueNewBookings(newBookings);
             TimeUnit.MILLISECONDS.sleep(400);
         }
     }
@@ -68,21 +79,11 @@ public final class Server {
         return Store.get(booking.getId()).isPresent();
     }
 
-    private static Set<BookingRecord> normalizeToBookingRecord(ChannelClient.EventsPage eventsPage) {
+    private static Set<BookingRecord> normalizeToBookingRecord(EventsPage eventsPage) {
         return eventsPage.events().stream()
                 .map(e -> ChannelPayloadNormalizer.normalize(e.payload()))
                 .map(normalizedBooking -> BookingRecord.as(normalizedBooking, "pending", 0))
                 .collect(Collectors.toSet());
-    }
-
-    private static void parallelConfirmEvents(ChannelClient.EventsPage eventsPage) {
-        eventsPage.events().stream().parallel().forEach(e -> {
-            try {
-                ChannelClient.ackEvent(e.eventId());
-            } catch (Exception ex) {
-                throw new RuntimeException(ex);
-            }
-        });
     }
 
     /** YOUR JOB (2 of 4): every booking, most recently updated first. */
@@ -104,14 +105,14 @@ public final class Server {
      * YOUR JOB (4 of 4): "Forzar sincronización manual". Only makes sense on a booking that is
      * failed; what happens to any other status is your call.
      */
-    private static void forceRetry(HttpExchange exchange, String id) throws IOException {
+    private void forceRetry(HttpExchange exchange, String id) throws IOException {
         var booking = Store.get(id);
         if (booking.isEmpty()) {
             Json.fail(exchange, 404, "NOT_FOUND", "Booking " + id + " does not exist.");
             return;
         }
 
-        switch (PmsRegisterer.retryFailedBooking(booking.get())) {
+        switch (pmsRegisterer.retryFailedBooking(booking.get())) {
             case ACCEPTED -> Json.send(exchange, 202, booking.get());
             case NOT_FAILED -> Json.fail(exchange, 409, "INVALID_STATUS",
                     "Only failed bookings can be retried.");
@@ -120,14 +121,14 @@ public final class Server {
         }
     }
 
-    public static HttpServer start(int port) throws IOException {
+    public HttpServer start(int port) throws IOException {
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
-        server.createContext("/", Server::route);
+        server.createContext("/", this::route);
         server.start();
         return server;
     }
 
-    private static void route(HttpExchange exchange) throws IOException {
+    private void route(HttpExchange exchange) throws IOException {
         String path = exchange.getRequestURI().getPath();
         String method = exchange.getRequestMethod();
 
@@ -188,14 +189,20 @@ public final class Server {
 
     public static void main(String[] args) throws Exception {
         int port = Integer.parseInt(Env.optional("PORT", "3000"));
-        HttpServer server = start(port);
-        PmsRegisterer.start();
-        Runtime.getRuntime().addShutdownHook(new Thread(PmsRegisterer::stop, "pms-shutdown"));
+
+        ChannelEventConsumer consumer = new ChannelEventConsumer();
+        PmsClient pmsClient = new WorkfactoryPmsClient();
+        PmsRegisterer pmsRegisterer = new PmsRegisterer(pmsClient);
+
+        Server application = new Server(pmsRegisterer, consumer);
+        HttpServer server = application.start(port);
+        pmsRegisterer.start();
+        Runtime.getRuntime().addShutdownHook(new Thread(pmsRegisterer::stop, "pms-shutdown"));
         System.out.println("Listening on http://localhost:" + port);
         try {
-            startChannelConsumer();
+            application.startChannelConsumer();
         } finally {
-            PmsRegisterer.stop();
+            pmsRegisterer.stop();
             server.stop(0);
         }
     }

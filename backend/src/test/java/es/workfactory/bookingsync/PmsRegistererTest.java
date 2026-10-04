@@ -4,7 +4,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import es.workfactory.bookingsync.domain.BookingRecord;
 import es.workfactory.bookingsync.domain.NormalizedBooking;
-import es.workfactory.bookingsync.pms.PmsRegisterer;
+import es.workfactory.bookingsync.pms.client.WorkfactoryPmsClient;
+import es.workfactory.bookingsync.pms.registerer.PmsRegisterer;
 import org.junit.jupiter.api.Test;
 
 import java.net.InetSocketAddress;
@@ -56,13 +57,14 @@ class PmsRegistererTest {
 
         String previousApiBase = System.getProperty("API_BASE");
         System.setProperty("API_BASE", "http://127.0.0.1:" + pms.getAddress().getPort());
+        PmsRegisterer registerer = new PmsRegisterer(new WorkfactoryPmsClient());
         try {
-            PmsRegisterer.start();
+            registerer.start();
             BookingRecord delayed = booking("delayed");
             BookingRecord ready = booking("ready");
-            PmsRegisterer.enqueueNewBookings(Set.of(delayed));
+            registerer.enqueueNewBookings(Set.of(delayed));
             assertTrue(firstRequestStarted.await(5, TimeUnit.SECONDS));
-            PmsRegisterer.enqueueNewBookings(Set.of(ready));
+            registerer.enqueueNewBookings(Set.of(ready));
             releaseFirstRequest.countDown();
 
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
@@ -77,7 +79,7 @@ class PmsRegistererTest {
             assertEquals(1, ready.getAttempts());
         } finally {
             releaseFirstRequest.countDown();
-            PmsRegisterer.stop();
+            registerer.stop();
             if (previousApiBase == null) System.clearProperty("API_BASE");
             else System.setProperty("API_BASE", previousApiBase);
             pms.stop(0);
@@ -113,16 +115,17 @@ class PmsRegistererTest {
 
         String previousApiBase = System.getProperty("API_BASE");
         System.setProperty("API_BASE", "http://127.0.0.1:" + pms.getAddress().getPort());
+        PmsRegisterer registerer = new PmsRegisterer(new WorkfactoryPmsClient());
         try {
-            PmsRegisterer.start();
+            registerer.start();
             BookingRecord first = booking("first");
             BookingRecord second = booking("second");
-            PmsRegisterer.enqueueNewBookings(Set.of(first));
+            registerer.enqueueNewBookings(Set.of(first));
             assertTrue(firstRequestStarted.await(5, TimeUnit.SECONDS));
 
             long startedAt = System.nanoTime();
-            PmsRegisterer.enqueueNewBookings(Set.of(first));
-            PmsRegisterer.enqueueNewBookings(Set.of(second));
+            registerer.enqueueNewBookings(Set.of(first));
+            registerer.enqueueNewBookings(Set.of(second));
             long enqueueMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
             assertTrue(enqueueMillis < 500, "Enqueue waited for the PMS worker");
             assertEquals("pending", second.getStatus());
@@ -137,7 +140,7 @@ class PmsRegistererTest {
             assertEquals(2, requests.get());
         } finally {
             releaseFirstRequest.countDown();
-            PmsRegisterer.stop();
+            registerer.stop();
             if (previousApiBase == null) System.clearProperty("API_BASE");
             else System.setProperty("API_BASE", previousApiBase);
             pms.stop(0);
@@ -158,8 +161,9 @@ class PmsRegistererTest {
 
         String previousApiBase = System.getProperty("API_BASE");
         System.setProperty("API_BASE", "http://127.0.0.1:" + pms.getAddress().getPort());
+        PmsRegisterer registerer = new PmsRegisterer(new WorkfactoryPmsClient());
         try {
-            PmsRegisterer.start();
+            registerer.start();
             Thread original = findWorker();
             assertNotNull(original);
             original.interrupt();
@@ -175,14 +179,14 @@ class PmsRegistererTest {
             assertTrue(replacement != original && replacement.isAlive());
 
             BookingRecord booking = booking("after-restart");
-            PmsRegisterer.enqueueNewBookings(Set.of(booking));
+            registerer.enqueueNewBookings(Set.of(booking));
             deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
             while (!"synced".equals(booking.getStatus()) && System.nanoTime() < deadline) {
                 Thread.sleep(20);
             }
             assertEquals("synced", booking.getStatus());
         } finally {
-            PmsRegisterer.stop();
+            registerer.stop();
             if (previousApiBase == null) System.clearProperty("API_BASE");
             else System.setProperty("API_BASE", previousApiBase);
             pms.stop(0);

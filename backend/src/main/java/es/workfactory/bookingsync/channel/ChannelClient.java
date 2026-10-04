@@ -1,7 +1,9 @@
-package es.workfactory.bookingsync;
+package es.workfactory.bookingsync.channel;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import es.workfactory.bookingsync.Env;
+
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -24,13 +26,6 @@ public final class ChannelClient {
             .build();
 
     private ChannelClient() {}
-
-    /** payload is what the channel sent, exactly as it sent it. */
-    public record ChannelEvent(String eventId, String channel, int deliveryAttempt, JsonNode payload) {}
-
-    public record EventsPage(List<ChannelEvent> events, boolean done) {}
-
-    public record Acknowledgement(boolean ok, int status) {}
 
     private static HttpRequest.Builder call(String path) {
         return HttpRequest.newBuilder(URI.create(Env.optional("API_BASE", "http://localhost:4000") + path))
@@ -58,8 +53,15 @@ public final class ChannelClient {
     }
 
     public static Acknowledgement ackEvent(String eventId) throws Exception {
+        return ackEvent(eventId, Duration.ofSeconds(5));
+    }
+
+    public static Acknowledgement ackEvent(String eventId, Duration timeout) throws Exception {
         HttpResponse<String> response = HTTP.send(
-                call("/channels/events/" + eventId + "/ack").POST(HttpRequest.BodyPublishers.noBody()).build(),
+                call("/channels/events/" + eventId + "/ack")
+                        .timeout(timeout)
+                        .POST(HttpRequest.BodyPublishers.noBody())
+                        .build(),
                 HttpResponse.BodyHandlers.ofString());
         return new Acknowledgement(response.statusCode() < 300, response.statusCode());
     }

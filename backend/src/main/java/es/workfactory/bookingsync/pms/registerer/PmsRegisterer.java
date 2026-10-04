@@ -1,8 +1,10 @@
-package es.workfactory.bookingsync.pms;
+package es.workfactory.bookingsync.pms.registerer;
 
 import es.workfactory.bookingsync.Env;
 import es.workfactory.bookingsync.domain.BookingRecord;
+import es.workfactory.bookingsync.pms.client.PmsClient;
 
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.DelayQueue;
@@ -21,16 +23,17 @@ public class PmsRegisterer {
     private static final long SHUTDOWN_TIMEOUT_MS = 5_000;
     private static final long RETRY_DELAY_MS = 400;
     private static final int MAX_TRIES_FOR_REGISTERING =
-            Integer.parseInt(Env.optional("MAX_TRIES_FOR_REGISTERING_BOOKING_PMS", "3"));
-    private static final DelayQueue<ScheduledBooking> PENDING_BOOKINGS = new DelayQueue<>();
-    private static final Semaphore AVAILABLE_SLOTS = new Semaphore(QUEUE_CAPACITY);
-    private static final Set<String> QUEUED_OR_ACTIVE_IDS = ConcurrentHashMap.newKeySet();
-    private static final Object LIFECYCLE_LOCK = new Object();
-    private static volatile boolean stopping = true;
-    private static volatile boolean startedOnce;
-    private static volatile Thread worker;
-    private static volatile Thread supervisor;
-    private static volatile BookingRecord activeBooking;
+            Integer.parseInt(Env.optional("MAX_TRIES_FOR_REGISTERING_BOOKING_PMS", "4"));
+    private final PmsClient client;
+    private final DelayQueue<ScheduledBooking> pendingBookings = new DelayQueue<>();
+    private final Semaphore availableSlots = new Semaphore(QUEUE_CAPACITY);
+    private final Set<String> queuedOrActiveIds = ConcurrentHashMap.newKeySet();
+    private final Object lifecycleLock = new Object();
+    private volatile boolean stopping = true;
+    private volatile boolean startedOnce;
+    private volatile Thread worker;
+    private volatile Thread supervisor;
+    private volatile BookingRecord activeBooking;
 
     private record ScheduledBooking(BookingRecord booking, long dueAtNanos) implements Delayed {
         static ScheduledBooking now(BookingRecord booking) {
@@ -52,11 +55,12 @@ public class PmsRegisterer {
         }
     }
 
-    private PmsRegisterer() {
+    public PmsRegisterer(PmsClient client) {
+        this.client = Objects.requireNonNull(client, "client");
     }
 
-    public static void start() {
-        synchronized (LIFECYCLE_LOCK) {
+    public void start() {
+        synchronized (lifecycleLock) {
             if (!stopping) return;
             if (worker != null && worker.isAlive()) {
                 throw new IllegalStateException("The previous PMS worker is still stopping");
@@ -64,16 +68,16 @@ public class PmsRegisterer {
             stopping = false;
             startedOnce = true;
             startWorkerLocked();
-            supervisor = new Thread(PmsRegisterer::superviseWorker, "pms-supervisor");
+            supervisor = new Thread(this::superviseWorker, "pms-supervisor");
             supervisor.setDaemon(true);
             supervisor.start();
         }
     }
 
-    public static void stop() {
+    public void stop() {
         Thread workerToStop;
         Thread supervisorToStop;
-        synchronized (LIFECYCLE_LOCK) {
+        synchronized (lifecycleLock) {
             if (stopping) return;
             stopping = true;
             workerToStop = worker;
@@ -85,8 +89,8 @@ public class PmsRegisterer {
         awaitStop(workerToStop);
         awaitStop(supervisorToStop);
 
-        for (ScheduledBooking scheduled : PENDING_BOOKINGS.toArray(new ScheduledBooking[0])) {
-            if (PENDING_BOOKINGS.remove(scheduled)) {
+        for (ScheduledBooking scheduled : pendingBookings.toArray(new ScheduledBooking[0])) {
+            if (pendingBookings.remove(scheduled)) {
                 BookingRecord pending = scheduled.booking();
                 pending.markStatus("failed", pending.getAttempts(), "PMS worker stopped before processing", null);
                 finishBooking(pending);
@@ -108,14 +112,14 @@ public class PmsRegisterer {
         }
     }
 
-    private static void startWorkerLocked() {
+    private void startWorkerLocked() {
         if (stopping || (worker != null && worker.isAlive())) return;
-        worker = new Thread(PmsRegisterer::consumeBookings, "pms-registerer");
+        worker = new Thread(this::consumeBookings, "pms-registerer");
         worker.setDaemon(true);
         worker.start();
     }
 
-    private static void superviseWorker() {
+    private void superviseWorker() {
         while (!stopping) {
             try {
                 TimeUnit.MILLISECONDS.sleep(SUPERVISOR_INTERVAL_MS);
@@ -123,7 +127,7 @@ public class PmsRegisterer {
                 if (stopping) return;
             }
 
-            synchronized (LIFECYCLE_LOCK) {
+            synchronized (lifecycleLock) {
                 if (stopping) return;
                 if (worker != null && worker.isAlive()) continue;
 
@@ -139,35 +143,35 @@ public class PmsRegisterer {
         }
     }
 
-    public static void enqueueNewBookings(Set<BookingRecord> newBookings) {
+    public void enqueueNewBookings(Set<BookingRecord> newBookings) {
         if (!startedOnce) start();
         for (BookingRecord booking : newBookings) {
-            synchronized (LIFECYCLE_LOCK) {
+            synchronized (lifecycleLock) {
                 if (stopping) {
                     booking.markStatus("failed", booking.getAttempts(), "PMS worker is stopped", null);
                     continue;
                 }
                 if (isSynced(booking)) continue;
                 if (isBeingProcessed(booking)) continue;
-                if (!AVAILABLE_SLOTS.tryAcquire()) {
-                    QUEUED_OR_ACTIVE_IDS.remove(booking.getId());
+                if (!availableSlots.tryAcquire()) {
+                    queuedOrActiveIds.remove(booking.getId());
                     booking.markStatus("failed", booking.getAttempts(), "PMS queue is full", null);
                     continue;
                 }
-                PENDING_BOOKINGS.offer(ScheduledBooking.now(booking));
+                pendingBookings.offer(ScheduledBooking.now(booking));
             }
         }
     }
 
-    public static RetryResult retryFailedBooking(BookingRecord booking) {
+    public RetryResult retryFailedBooking(BookingRecord booking) {
         if (!startedOnce) start();
-        synchronized (LIFECYCLE_LOCK) {
+        synchronized (lifecycleLock) {
             if (!"failed".equals(booking.getStatus())) return RetryResult.NOT_FAILED;
-            if (stopping || !QUEUED_OR_ACTIVE_IDS.add(booking.getId())) {
+            if (stopping || !queuedOrActiveIds.add(booking.getId())) {
                 return RetryResult.UNAVAILABLE;
             }
-            if (!AVAILABLE_SLOTS.tryAcquire()) {
-                QUEUED_OR_ACTIVE_IDS.remove(booking.getId());
+            if (!availableSlots.tryAcquire()) {
+                queuedOrActiveIds.remove(booking.getId());
                 return RetryResult.UNAVAILABLE;
             }
 
@@ -176,30 +180,30 @@ public class PmsRegisterer {
             String previousReference = booking.getPmsReference();
             booking.markStatus("pending", 0, null, null);
             try {
-                PENDING_BOOKINGS.offer(ScheduledBooking.now(booking));
+                pendingBookings.offer(ScheduledBooking.now(booking));
             } catch (RuntimeException e) {
                 booking.markStatus("failed", previousAttempts, previousError, previousReference);
-                QUEUED_OR_ACTIVE_IDS.remove(booking.getId());
-                AVAILABLE_SLOTS.release();
+                queuedOrActiveIds.remove(booking.getId());
+                availableSlots.release();
                 throw e;
             }
             return RetryResult.ACCEPTED;
         }
     }
 
-    private static boolean isBeingProcessed(BookingRecord booking) {
-        return !QUEUED_OR_ACTIVE_IDS.add(booking.getId());
+    private boolean isBeingProcessed(BookingRecord booking) {
+        return !queuedOrActiveIds.add(booking.getId());
     }
 
     private static boolean isSynced(BookingRecord booking) {
         return "synced".equals(booking.getStatus());
     }
 
-    private static void consumeBookings() {
+    private void consumeBookings() {
         while (!Thread.currentThread().isInterrupted()) {
             ScheduledBooking scheduled;
             try {
-                scheduled = PENDING_BOOKINGS.take();
+                scheduled = pendingBookings.take();
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return;
@@ -210,13 +214,13 @@ public class PmsRegisterer {
             try {
                 AttemptResult result = attemptBooking(booking);
                 if (result == AttemptResult.RETRY) {
-                    synchronized (LIFECYCLE_LOCK) {
+                    synchronized (lifecycleLock) {
                         if (stopping) {
                             booking.markStatus("failed", booking.getAttempts(),
                                     "PMS worker stopped before retrying", null);
                             finishBookingLocked(booking);
                         } else {
-                            PENDING_BOOKINGS.offer(ScheduledBooking.after(booking, RETRY_DELAY_MS));
+                            pendingBookings.offer(ScheduledBooking.after(booking, RETRY_DELAY_MS));
                             activeBooking = null;
                         }
                     }
@@ -237,15 +241,15 @@ public class PmsRegisterer {
         }
     }
 
-    private static void finishBooking(BookingRecord booking) {
-        synchronized (LIFECYCLE_LOCK) {
+    private void finishBooking(BookingRecord booking) {
+        synchronized (lifecycleLock) {
             finishBookingLocked(booking);
         }
     }
 
-    private static void finishBookingLocked(BookingRecord booking) {
-        if (QUEUED_OR_ACTIVE_IDS.remove(booking.getId())) {
-            AVAILABLE_SLOTS.release();
+    private void finishBookingLocked(BookingRecord booking) {
+        if (queuedOrActiveIds.remove(booking.getId())) {
+            availableSlots.release();
         }
         if (activeBooking == booking) activeBooking = null;
     }
@@ -257,7 +261,7 @@ public class PmsRegisterer {
                 : e.getClass().getSimpleName() + ": " + message;
     }
 
-    private static AttemptResult attemptBooking(BookingRecord booking) throws InterruptedException {
+    private AttemptResult attemptBooking(BookingRecord booking) throws InterruptedException {
         if (booking.getAttempts() >= MAX_TRIES_FOR_REGISTERING) {
             booking.markStatus("failed", booking.getAttempts(), "PMS attempt limit reached", null);
             return AttemptResult.FAILED;
@@ -266,7 +270,7 @@ public class PmsRegisterer {
         int totalAttempts = booking.getAttempts() + 1;
         booking.markStatus("syncing", booking.getAttempts(), null, null);
         try {
-            PmsClient.Result result = PmsClient.submit(booking.toNormalizedBooking());
+            PmsClient.Result result = client.submit(booking.toNormalizedBooking());
             if (result.ok()) {
                 booking.markStatus("synced", totalAttempts, null, result.pmsReference());
                 return AttemptResult.SYNCED;
